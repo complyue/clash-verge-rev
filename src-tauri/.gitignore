@@ -4,5 +4,6 @@
 gen/
 WixTools
 resources
-sidecar
-
+!sidecar/
+sidecar/*
+!sidecar/kcptun-client-*

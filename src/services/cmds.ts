@@ -85,6 +85,26 @@ export async function getClashInfo() {
   return invoke<IClashInfo | null>('get_clash_info')
 }
 
+export async function startKcptunClient() {
+  return invoke<void>('start_kcptun_client')
+}
+
+export async function stopKcptunClient() {
+  return invoke<void>('stop_kcptun_client')
+}
+
+export async function restartKcptunClient() {
+  return invoke<void>('restart_kcptun_client')
+}
+
+export async function getKcptunStatus() {
+  return invoke<boolean>('get_kcptun_status')
+}
+
+export async function testKcptunUpstreamProxy() {
+  return invoke<string>('test_kcptun_upstream_proxy')
+}
+
 // Get runtime config which controlled by verge
 export async function getRuntimeConfig() {
   return invoke<IConfigData | null>('get_runtime_config')
