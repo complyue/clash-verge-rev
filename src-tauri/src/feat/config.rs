@@ -12,8 +12,12 @@ use serde_yaml_ng::Mapping;
 /// Patch Clash configuration
 pub async fn patch_clash(patch: &Mapping) -> Result<()> {
     Config::clash().await.edit_draft(|d| d.patch_config(patch));
+    let sync_kcp = patch.get("allow-lan").is_some();
 
     let res = {
+        if sync_kcp {
+            crate::core::KcptunManager::global().sync_with_config().await?;
+        }
         // 激活订阅
         if patch.get("secret").is_some() || patch.get("external-controller").is_some() {
             Config::generate().await?;
@@ -38,6 +42,13 @@ pub async fn patch_clash(patch: &Mapping) -> Result<()> {
         }
         Err(err) => {
             Config::clash().await.discard();
+            if sync_kcp && let Err(rollback_err) = crate::core::KcptunManager::global().sync_with_config().await {
+                logging!(
+                    warn,
+                    Type::Setup,
+                    "Failed to roll back kcptun state after Clash config error: {rollback_err}"
+                );
+            }
             Err(err)
         }
     }
@@ -61,6 +72,7 @@ bitflags! {
         const LANGUAGE = 1 << 11;
         const LOG_LEVEL = 1 << 12;
         const LOG_FILE = 1 << 13;
+        const KCP_PROXY = 1 << 14;
 
         const GROUP_SYS_TRAY = Self::SYSTRAY_MENU.bits()
                              | Self::SYSTRAY_TOOLTIP.bits()
@@ -142,6 +154,9 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     if restart_core_needed {
         update_flags.insert(UpdateFlags::RESTART_CORE);
     }
+    if patch.kcp_proxy.is_some() || patch.proxy_host.is_some() {
+        update_flags.insert(UpdateFlags::KCP_PROXY | UpdateFlags::CLASH_CONFIG);
+    }
     if tun_mode.is_some() {
         update_flags.insert(UpdateFlags::CLASH_CONFIG | UpdateFlags::GROUP_SYS_TRAY);
     }
@@ -157,6 +172,7 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     if proxy_bypass.is_some()
         || pac_content.is_some()
         || pac.is_some()
+        || patch.proxy_host.is_some()
         || enable_proxy_guard.is_some()
         || proxy_guard_duration.is_some()
     {
@@ -201,6 +217,9 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
 #[allow(clippy::cognitive_complexity)]
 async fn process_terminated_flags(update_flags: UpdateFlags, patch: &IVerge) -> Result<()> {
     // Process updates based on flags
+    if update_flags.contains(UpdateFlags::KCP_PROXY) {
+        crate::core::KcptunManager::global().sync_with_config().await?;
+    }
     if update_flags.contains(UpdateFlags::RESTART_CORE) {
         Config::generate().await?;
         CoreManager::global().restart_core().await?;
@@ -280,6 +299,15 @@ pub async fn patch_verge(patch: &IVerge, not_save_file: bool) -> Result<()> {
 
     if let Err(err) = process_flag_result {
         Config::verge().await.discard();
+        if update_flags.contains(UpdateFlags::KCP_PROXY)
+            && let Err(rollback_err) = crate::core::KcptunManager::global().sync_with_config().await
+        {
+            logging!(
+                warn,
+                Type::Setup,
+                "Failed to roll back kcptun state after config error: {rollback_err}"
+            );
+        }
         return Err(err);
     }
     Config::verge().await.apply();

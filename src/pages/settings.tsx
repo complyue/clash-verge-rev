@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 
 import { BasePage } from '@/components/base'
 import SettingClash from '@/components/setting/setting-clash'
+import KcpTunnelSetting from '@/components/setting/setting-kcp-tunnel'
 import SettingSystem from '@/components/setting/setting-system'
 import SettingVergeAdvanced from '@/components/setting/setting-verge-advanced'
 import SettingVergeBasic from '@/components/setting/setting-verge-basic'
@@ -81,10 +82,19 @@ const SettingPage = () => {
           <Box
             sx={{
               borderRadius: 2,
+              marginBottom: 1.5,
               backgroundColor: isDark ? '#282a36' : '#ffffff',
             }}
           >
             <SettingClash onError={onError} />
+          </Box>
+          <Box
+            sx={{
+              borderRadius: 2,
+              backgroundColor: isDark ? '#282a36' : '#ffffff',
+            }}
+          >
+            <KcpTunnelSetting />
           </Box>
         </Grid>
         <Grid size={6}>

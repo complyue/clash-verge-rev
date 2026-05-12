@@ -13,6 +13,7 @@ use self::{
     seq::{SeqMap, use_seq},
     tun::use_tun,
 };
+use crate::config::{IKcpProxy, kcp_connect_host, kcp_listen_host};
 use crate::utils::dirs;
 use crate::{config::Config, utils::tmpl};
 use crate::{config::IVerge, constants};
@@ -33,6 +34,8 @@ struct ConfigValues {
     socks_enabled: bool,
     http_enabled: bool,
     enable_dns_settings: bool,
+    kcp_proxy: Option<IKcpProxy>,
+    proxy_host: Option<String>,
     #[cfg(not(target_os = "windows"))]
     redir_enabled: bool,
     #[cfg(target_os = "linux")]
@@ -105,16 +108,29 @@ async fn get_config_values() -> ConfigValues {
         ref verge_socks_enabled,
         ref verge_http_enabled,
         ref enable_dns_settings,
+        ref kcp_proxy,
+        ref proxy_host,
         ..
     } = *verge_arc;
 
-    let (clash_core, enable_tun, enable_builtin, socks_enabled, http_enabled, enable_dns_settings) = (
+    let (
+        clash_core,
+        enable_tun,
+        enable_builtin,
+        socks_enabled,
+        http_enabled,
+        enable_dns_settings,
+        kcp_proxy,
+        proxy_host,
+    ) = (
         Some(verge_arc.get_valid_clash_core()),
         enable_tun_mode.unwrap_or(false),
         enable_builtin_enhanced.unwrap_or(true),
         verge_socks_enabled.unwrap_or(false),
         verge_http_enabled.unwrap_or(false),
         enable_dns_settings.unwrap_or(false),
+        kcp_proxy.clone(),
+        proxy_host.clone(),
     );
 
     #[cfg(not(target_os = "windows"))]
@@ -134,6 +150,8 @@ async fn get_config_values() -> ConfigValues {
         socks_enabled,
         http_enabled,
         enable_dns_settings,
+        kcp_proxy,
+        proxy_host,
         #[cfg(not(target_os = "windows"))]
         redir_enabled,
         #[cfg(target_os = "linux")]
@@ -577,6 +595,158 @@ async fn apply_dns_settings(mut config: Mapping, enable_dns_settings: bool) -> M
     config
 }
 
+const KCP_PROXY_NAME: &str = "KCP Tunnel HTTP";
+
+fn normalize_kcp_domain(value: &str) -> Option<String> {
+    let value = value.split('#').next().unwrap_or_default().trim();
+    if value.is_empty() || value.starts_with('#') {
+        return None;
+    }
+
+    let value_lower = value.to_ascii_lowercase();
+    let value = if value_lower.starts_with("http://") {
+        &value[7..]
+    } else if value_lower.starts_with("https://") {
+        &value[8..]
+    } else {
+        value
+    };
+    let value = value
+        .trim_start_matches("+.")
+        .trim_start_matches("*.")
+        .trim_start_matches('.');
+
+    let domain = value
+        .split('/')
+        .next()
+        .and_then(|host| host.split(':').next())
+        .map(str::trim)
+        .unwrap_or_default();
+
+    if domain.is_empty() || domain.contains(',') || domain.chars().any(char::is_whitespace) {
+        None
+    } else {
+        Some(domain.to_ascii_lowercase().into())
+    }
+}
+
+fn is_kcp_proxy_rule(rule: &str) -> bool {
+    let parts = rule
+        .split(',')
+        .map(str::trim)
+        .map(|part| part.trim_matches('"').trim_matches('\''))
+        .collect::<Vec<_>>();
+    let policy = if parts
+        .first()
+        .is_some_and(|rule_type| rule_type.eq_ignore_ascii_case("MATCH"))
+    {
+        parts.get(1)
+    } else {
+        parts.get(2)
+    };
+
+    policy.copied() == Some(KCP_PROXY_NAME)
+}
+
+fn remove_kcp_proxy_groups(config: &mut Mapping) {
+    if let Some(Value::Sequence(groups)) = config.get_mut("proxy-groups") {
+        groups.retain(|item| {
+            item.as_mapping()
+                .and_then(|item| item.get("name"))
+                .and_then(Value::as_str)
+                != Some(KCP_PROXY_NAME)
+        });
+    }
+}
+
+fn apply_kcp_proxy_routes(mut config: Mapping, kcp_proxy: Option<IKcpProxy>, proxy_host: Option<String>) -> Mapping {
+    let Some(kcp_proxy) = kcp_proxy else {
+        return config;
+    };
+
+    if !kcp_proxy.enabled.unwrap_or(false) {
+        remove_kcp_proxy_routes(&mut config);
+        return config;
+    }
+
+    let local_port = match kcp_proxy.local_port.unwrap_or(1087) {
+        0 => 1087,
+        port => port,
+    };
+    let allow_lan = config.get("allow-lan").and_then(Value::as_bool).unwrap_or(false);
+    let listen_host = kcp_listen_host(allow_lan, proxy_host.as_deref());
+    let connect_host = kcp_connect_host(&listen_host);
+    let mut domains = kcp_proxy
+        .domains
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|domain| normalize_kcp_domain(&domain))
+        .collect::<Vec<_>>();
+    let mut seen_domains = HashSet::new();
+    domains.retain(|domain| seen_domains.insert(domain.clone()));
+
+    remove_kcp_proxy_groups(&mut config);
+
+    let mut proxy = Mapping::new();
+    proxy.insert("name".into(), KCP_PROXY_NAME.into());
+    proxy.insert("type".into(), "http".into());
+    proxy.insert("server".into(), connect_host.into());
+    proxy.insert("port".into(), local_port.into());
+
+    if let Some(username) = kcp_proxy.proxy_username.filter(|value| !value.is_empty()) {
+        proxy.insert("username".into(), username.as_str().into());
+        let password = kcp_proxy.proxy_password.unwrap_or_default();
+        proxy.insert("password".into(), password.as_str().into());
+    }
+
+    let mut proxies = config
+        .remove("proxies")
+        .and_then(|value| value.as_sequence().cloned())
+        .unwrap_or_default();
+    proxies.retain(|item| {
+        item.as_mapping()
+            .and_then(|item| item.get("name"))
+            .and_then(Value::as_str)
+            != Some(KCP_PROXY_NAME)
+    });
+    proxies.insert(0, Value::Mapping(proxy));
+    config.insert("proxies".into(), proxies.into());
+
+    let mut rules = config
+        .remove("rules")
+        .and_then(|value| value.as_sequence().cloned())
+        .unwrap_or_default();
+    rules.retain(|rule| rule.as_str().map(|rule| !is_kcp_proxy_rule(rule)).unwrap_or(true));
+
+    if kcp_proxy.catch_all.unwrap_or(false) {
+        rules.insert(0, format!("MATCH,{KCP_PROXY_NAME}").into());
+    } else {
+        for domain in domains.into_iter().rev() {
+            rules.insert(0, format!("DOMAIN-SUFFIX,{domain},{KCP_PROXY_NAME}").into());
+        }
+    }
+    config.insert("rules".into(), rules.into());
+
+    config
+}
+
+fn remove_kcp_proxy_routes(config: &mut Mapping) {
+    remove_kcp_proxy_groups(config);
+
+    if let Some(Value::Sequence(proxies)) = config.get_mut("proxies") {
+        proxies.retain(|item| {
+            item.as_mapping()
+                .and_then(|item| item.get("name"))
+                .and_then(Value::as_str)
+                != Some(KCP_PROXY_NAME)
+        });
+    }
+
+    if let Some(Value::Sequence(rules)) = config.get_mut("rules") {
+        rules.retain(|rule| rule.as_str().map(|rule| !is_kcp_proxy_rule(rule)).unwrap_or(true));
+    }
+}
+
 /// Enhance mode
 /// 返回最终订阅、该订阅包含的键、和script执行的结果
 pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, ResultLog>)> {
@@ -590,6 +760,8 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
         socks_enabled,
         http_enabled,
         enable_dns_settings,
+        kcp_proxy,
+        proxy_host,
         #[cfg(not(target_os = "windows"))]
         redir_enabled,
         #[cfg(target_os = "linux")]
@@ -642,6 +814,8 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
     // builtin scripts
     let mut config = apply_builtin_scripts(config, clash_core, enable_builtin).await;
 
+    config = apply_kcp_proxy_routes(config, kcp_proxy, proxy_host);
+
     config = cleanup_proxy_groups(config);
 
     config = use_tun(config, enable_tun);
@@ -659,7 +833,8 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
 #[allow(clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use super::cleanup_proxy_groups;
+    use super::{KCP_PROXY_NAME, apply_kcp_proxy_routes, cleanup_proxy_groups};
+    use crate::config::IKcpProxy;
 
     #[test]
     fn remove_missing_proxies_from_groups() {
@@ -814,5 +989,177 @@ proxy-groups:
             .expect("proxies should be a sequence");
         assert_eq!(proxies.len(), 1);
         assert_eq!(proxies[0].as_str(), Some("DIRECT"));
+    }
+
+    #[test]
+    fn kcp_domain_routes_target_dedicated_proxy_without_fallback_group() {
+        let config_str = r#"
+allow-lan: true
+proxies:
+  - name: "regular-node"
+    type: ss
+  - name: "KCP Tunnel HTTP"
+    type: direct
+proxy-groups:
+  - name: "KCP Tunnel HTTP"
+    type: fallback
+    proxies:
+      - "regular-node"
+      - "DIRECT"
+rules:
+  - "DOMAIN-SUFFIX,old.example,\"KCP Tunnel HTTP\",no-resolve"
+  - "MATCH,regular-node"
+"#;
+
+        let mut config: serde_yaml_ng::Mapping =
+            serde_yaml_ng::from_str(config_str).expect("Failed to parse test yaml");
+        config = apply_kcp_proxy_routes(
+            config,
+            Some(IKcpProxy {
+                enabled: Some(true),
+                local_port: Some(1087),
+                proxy_username: Some("user".into()),
+                proxy_password: Some("pass".into()),
+                domains: Some(vec![
+                    "HTTPS://example.com/path".into(),
+                    "*.example.net".into(),
+                    "+.example.org".into(),
+                    "EXAMPLE.com # duplicate".into(),
+                ]),
+                ..IKcpProxy::template()
+            }),
+            Some("127.0.0.1".into()),
+        );
+
+        let proxies = config
+            .get("proxies")
+            .and_then(|v| v.as_sequence())
+            .expect("proxies should be a sequence");
+        let kcp_proxy = proxies[0].as_mapping().expect("first proxy should be a mapping");
+        assert_eq!(
+            kcp_proxy.get("name").and_then(serde_yaml_ng::Value::as_str),
+            Some(KCP_PROXY_NAME)
+        );
+        assert_eq!(
+            kcp_proxy.get("type").and_then(serde_yaml_ng::Value::as_str),
+            Some("http")
+        );
+        assert_eq!(
+            kcp_proxy.get("server").and_then(serde_yaml_ng::Value::as_str),
+            Some("127.0.0.1")
+        );
+        assert_eq!(kcp_proxy.get("port").and_then(serde_yaml_ng::Value::as_u64), Some(1087));
+        assert_eq!(
+            kcp_proxy.get("username").and_then(serde_yaml_ng::Value::as_str),
+            Some("user")
+        );
+        assert_eq!(
+            kcp_proxy.get("password").and_then(serde_yaml_ng::Value::as_str),
+            Some("pass")
+        );
+
+        let groups = config
+            .get("proxy-groups")
+            .and_then(|v| v.as_sequence())
+            .expect("proxy-groups should be a sequence");
+        assert!(
+            groups
+                .iter()
+                .all(|group| group.get("name").and_then(serde_yaml_ng::Value::as_str) != Some(KCP_PROXY_NAME))
+        );
+
+        let rules = config
+            .get("rules")
+            .and_then(|v| v.as_sequence())
+            .expect("rules should be a sequence");
+        assert_eq!(rules[0].as_str(), Some("DOMAIN-SUFFIX,example.com,KCP Tunnel HTTP"));
+        assert_eq!(rules[1].as_str(), Some("DOMAIN-SUFFIX,example.net,KCP Tunnel HTTP"));
+        assert_eq!(rules[2].as_str(), Some("DOMAIN-SUFFIX,example.org,KCP Tunnel HTTP"));
+        assert_eq!(rules[3].as_str(), Some("MATCH,regular-node"));
+        assert!(
+            !rules
+                .iter()
+                .any(|rule| rule.as_str() == Some("DOMAIN-SUFFIX,old.example,\"KCP Tunnel HTTP\",no-resolve"))
+        );
+    }
+
+    #[test]
+    fn kcp_catch_all_routes_match_to_dedicated_proxy() {
+        let config_str = r#"
+proxies:
+  - name: "regular-node"
+    type: ss
+rules:
+  - "DOMAIN-SUFFIX,old.example,\"KCP Tunnel HTTP\",no-resolve"
+  - "DOMAIN-SUFFIX,example.com,regular-node"
+"#;
+
+        let mut config: serde_yaml_ng::Mapping =
+            serde_yaml_ng::from_str(config_str).expect("Failed to parse test yaml");
+        config = apply_kcp_proxy_routes(
+            config,
+            Some(IKcpProxy {
+                enabled: Some(true),
+                local_port: Some(1087),
+                catch_all: Some(true),
+                domains: Some(vec!["example.org".into()]),
+                ..IKcpProxy::template()
+            }),
+            Some("127.0.0.1".into()),
+        );
+
+        let rules = config
+            .get("rules")
+            .and_then(|v| v.as_sequence())
+            .expect("rules should be a sequence");
+        assert_eq!(rules[0].as_str(), Some("MATCH,KCP Tunnel HTTP"));
+        assert_eq!(rules[1].as_str(), Some("DOMAIN-SUFFIX,example.com,regular-node"));
+        assert!(
+            !rules
+                .iter()
+                .any(|rule| rule.as_str() == Some("DOMAIN-SUFFIX,example.org,KCP Tunnel HTTP"))
+        );
+        assert!(
+            !rules
+                .iter()
+                .any(|rule| rule.as_str() == Some("DOMAIN-SUFFIX,old.example,\"KCP Tunnel HTTP\",no-resolve"))
+        );
+    }
+
+    #[test]
+    fn kcp_route_cleanup_removes_match_rules() {
+        let config_str = r#"
+proxies:
+  - name: "KCP Tunnel HTTP"
+    type: http
+  - name: "regular-node"
+    type: ss
+rules:
+  - "MATCH,KCP Tunnel HTTP"
+  - "MATCH,regular-node"
+"#;
+
+        let mut config: serde_yaml_ng::Mapping =
+            serde_yaml_ng::from_str(config_str).expect("Failed to parse test yaml");
+        config = apply_kcp_proxy_routes(config, Some(IKcpProxy::template()), Some("127.0.0.1".into()));
+
+        let proxies = config
+            .get("proxies")
+            .and_then(|v| v.as_sequence())
+            .expect("proxies should be a sequence");
+        assert!(!proxies.iter().any(|proxy| {
+            proxy
+                .as_mapping()
+                .and_then(|proxy| proxy.get("name"))
+                .and_then(serde_yaml_ng::Value::as_str)
+                == Some(KCP_PROXY_NAME)
+        }));
+
+        let rules = config
+            .get("rules")
+            .and_then(|v| v.as_sequence())
+            .expect("rules should be a sequence");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].as_str(), Some("MATCH,regular-node"));
     }
 }

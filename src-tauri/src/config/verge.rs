@@ -257,6 +257,9 @@ pub struct IVerge {
 
     /// 启用外部控制器
     pub enable_external_controller: Option<bool>,
+
+    /// kcptun client backed upstream HTTP proxy
+    pub kcp_proxy: Option<IKcpProxy>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -265,6 +268,96 @@ pub struct IVergeTestItem {
     pub name: Option<String>,
     pub icon: Option<String>,
     pub url: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
+pub struct IKcpProxy {
+    pub enabled: Option<bool>,
+    pub client_path: Option<String>,
+    pub server: Option<String>,
+    pub remote_port: Option<u16>,
+    pub local_port: Option<u16>,
+    #[serde(
+        serialize_with = "serialize_encrypted",
+        deserialize_with = "deserialize_encrypted",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub key: Option<String>,
+    pub crypt: Option<String>,
+    pub mode: Option<String>,
+    pub mtu: Option<u16>,
+    pub sndwnd: Option<u16>,
+    pub rcvwnd: Option<u16>,
+    pub datashard: Option<u16>,
+    pub parityshard: Option<u16>,
+    pub dscp: Option<u16>,
+    pub nocomp: Option<bool>,
+    pub tcp: Option<bool>,
+    pub proxy_username: Option<String>,
+    #[serde(
+        serialize_with = "serialize_encrypted",
+        deserialize_with = "deserialize_encrypted",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub proxy_password: Option<String>,
+    pub catch_all: Option<bool>,
+    pub domains: Option<Vec<String>>,
+}
+
+impl IKcpProxy {
+    pub fn template() -> Self {
+        Self {
+            enabled: Some(false),
+            client_path: None,
+            server: Some("127.0.0.1".into()),
+            remote_port: Some(29900),
+            local_port: Some(1087),
+            key: Some("password".into()),
+            crypt: Some("aes".into()),
+            mode: Some("fast".into()),
+            mtu: Some(1350),
+            sndwnd: Some(512),
+            rcvwnd: Some(512),
+            datashard: Some(10),
+            parityshard: Some(3),
+            dscp: Some(0),
+            nocomp: Some(true),
+            tcp: Some(false),
+            proxy_username: None,
+            proxy_password: None,
+            catch_all: Some(false),
+            domains: Some(Vec::new()),
+        }
+    }
+}
+
+pub fn kcp_listen_host(allow_lan: bool, proxy_host: Option<&str>) -> std::string::String {
+    if !allow_lan {
+        return "127.0.0.1".into();
+    }
+
+    let host = proxy_host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0.0.0.0")
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+
+    if matches!(host, "127.0.0.1" | "::1" | "localhost") {
+        "0.0.0.0".into()
+    } else {
+        host.into()
+    }
+}
+
+pub fn kcp_connect_host(listen_host: &str) -> std::string::String {
+    match listen_host {
+        "0.0.0.0" => "127.0.0.1".into(),
+        "::" => "::1".into(),
+        host => host.into(),
+    }
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -449,6 +542,7 @@ impl IVerge {
             enable_dns_settings: Some(false),
             home_cards: None,
             enable_external_controller: Some(false),
+            kcp_proxy: Some(IKcpProxy::template()),
             ..Self::default()
         }
     }
@@ -554,6 +648,7 @@ impl IVerge {
         patch!(enable_dns_settings);
         patch!(home_cards);
         patch!(enable_external_controller);
+        patch!(kcp_proxy);
     }
 
     pub const fn get_singleton_port() -> u16 {
@@ -575,5 +670,19 @@ impl IVerge {
         } else {
             LevelFilter::Info
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kcp_connect_host, kcp_listen_host};
+
+    #[test]
+    fn kcp_listen_host_follows_allow_lan() {
+        assert_eq!(kcp_listen_host(false, Some("0.0.0.0")), "127.0.0.1");
+        assert_eq!(kcp_listen_host(true, Some("127.0.0.1")), "0.0.0.0");
+        assert_eq!(kcp_listen_host(true, Some("192.168.1.10")), "192.168.1.10");
+        assert_eq!(kcp_connect_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(kcp_connect_host("::"), "::1");
     }
 }

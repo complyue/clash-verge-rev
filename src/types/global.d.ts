@@ -984,6 +984,30 @@ interface IVergeConfig {
   enable_hover_jump_navigator?: boolean
   hover_jump_navigator_delay?: number
   enable_external_controller?: boolean
+  kcp_proxy?: IKcpProxyConfig
+}
+
+interface IKcpProxyConfig {
+  enabled?: boolean
+  client_path?: string
+  server?: string
+  remote_port?: number
+  local_port?: number
+  key?: string
+  crypt?: string
+  mode?: string
+  mtu?: number
+  sndwnd?: number
+  rcvwnd?: number
+  datashard?: number
+  parityshard?: number
+  dscp?: number
+  nocomp?: boolean
+  tcp?: boolean
+  proxy_username?: string
+  proxy_password?: string
+  catch_all?: boolean
+  domains?: string[]
 }
 
 interface IWebDavFile {

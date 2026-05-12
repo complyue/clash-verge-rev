@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod backup;
 pub mod handle;
 pub mod hotkey;
+pub mod kcptun;
 pub mod logger;
 pub mod manager;
 mod notification;
@@ -13,4 +14,6 @@ pub mod updater;
 pub mod validate;
 pub mod win_uwp;
 
-pub use self::{manager::CoreManager, timer::Timer, updater::SilentUpdater};
+pub use self::{
+    kcptun::KcptunManager, manager::CoreManager, timer::Timer, updater::SilentUpdater,
+};

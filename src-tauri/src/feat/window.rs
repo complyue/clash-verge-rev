@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::core::{CoreManager, handle, sysopt};
+use crate::core::{CoreManager, KcptunManager, handle, sysopt};
 use crate::module::lightweight;
 use crate::utils;
 use crate::utils::window_manager::WindowManager;
@@ -118,6 +118,11 @@ pub async fn clean_async() -> bool {
         }
     });
 
+    let kcptun_task = tokio::task::spawn(async {
+        KcptunManager::global().stop().await;
+        true
+    });
+
     // DNS恢复（仅macOS）
     let dns_task = tokio::task::spawn(async {
         #[cfg(target_os = "macos")]
@@ -141,21 +146,24 @@ pub async fn clean_async() -> bool {
     });
 
     // 并行执行清理任务
-    let (proxy_result, core_result, dns_result) = tokio::join!(proxy_task, core_task, dns_task);
+    let (proxy_result, core_result, dns_result, kcptun_result) =
+        tokio::join!(proxy_task, core_task, dns_task, kcptun_task);
 
     let proxy_success = proxy_result.unwrap_or_default();
     let core_success = core_result.unwrap_or_default();
     let dns_success = dns_result.unwrap_or_default();
+    let kcptun_success = kcptun_result.unwrap_or_default();
 
-    let all_success = proxy_success && core_success && dns_success;
+    let all_success = proxy_success && core_success && dns_success && kcptun_success;
 
     logging!(
         info,
         Type::System,
-        "异步关闭操作完成 - 代理: {}, 核心: {}, DNS: {}, 总体: {}",
+        "异步关闭操作完成 - 代理: {}, 核心: {}, DNS: {}, KCP: {}, 总体: {}",
         proxy_success,
         core_success,
         dns_success,
+        kcptun_success,
         all_success
     );
 
