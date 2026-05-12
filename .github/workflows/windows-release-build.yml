@@ -1,0 +1,104 @@
+name: Windows Release Build
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - '.github/workflows/windows-release-build.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Windows target'
+        required: true
+        type: choice
+        default: x86_64-pc-windows-msvc
+        options:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  HUSKY: 0
+  BUILD_TARGET: "${{ github.event.inputs.target || 'x86_64-pc-windows-msvc' }}"
+
+concurrency:
+  group: "${{ github.workflow }} - ${{ github.ref }} - ${{ github.event.inputs.target || 'x86_64-pc-windows-msvc' }}"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "Build ${{ github.event.inputs.target || 'x86_64-pc-windows-msvc' }}"
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.91.0'
+          targets: ${{ env.BUILD_TARGET }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: 'v1-rust'
+          key: 'rust-windows-release-${{ env.BUILD_TARGET }}'
+          workspaces: |
+            . -> target
+          cache-all-crates: true
+          cache-workspace-crates: true
+
+      - name: Add Rust Target
+        run: |
+          rustup target add ${{ env.BUILD_TARGET }} --toolchain 1.91.0 || rustup target add ${{ env.BUILD_TARGET }}
+          rustup target list --installed
+          echo "Rust target ${{ env.BUILD_TARGET }} installed."
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare Windows resources
+        run: pnpm run prebuild ${{ env.BUILD_TARGET }}
+
+      - name: Build Windows release bundle
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+        with:
+          tauriScript: pnpm
+          args: --target ${{ env.BUILD_TARGET }} --no-sign --config src-tauri/tauri.unsigned.conf.json
+
+      - name: Set artifact name
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "${{ env.BUILD_TARGET }}" in
+            x86_64-pc-windows-msvc) ARCH="x64" ;;
+            aarch64-pc-windows-msvc) ARCH="arm64" ;;
+          esac
+          echo "ARTIFACT_NAME=Clash.Verge_${VERSION}_${ARCH}_windows_internal_unsigned" >> "$GITHUB_ENV"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          archive: false
+          path: target/${{ env.BUILD_TARGET }}/release/bundle/nsis/*.exe
+          if-no-files-found: error

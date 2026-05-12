@@ -65,7 +65,7 @@ const SettingVergeAdvanced = ({ onError: _ }: Props) => {
   }, [])
 
   const copyVersion = useCallback(() => {
-    navigator.clipboard.writeText(`v${version}`).then(() => {
+    navigator.clipboard.writeText(`v${version} dw`).then(() => {
       showNotice.success(
         'settings.components.verge.advanced.notifications.versionCopied',
         1000,
@@ -169,7 +169,7 @@ const SettingVergeAdvanced = ({ onError: _ }: Props) => {
           />
         }
       >
-        <Typography sx={{ py: '7px', pr: 1 }}>v{version}</Typography>
+        <Typography sx={{ py: '7px', pr: 1 }}>v{version} dw</Typography>
       </SettingItem>
     </SettingList>
   )
