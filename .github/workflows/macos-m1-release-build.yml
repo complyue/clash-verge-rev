@@ -1,0 +1,90 @@
+name: macOS M1 Release Build
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/macos-m1-release-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  HUSKY: 0
+  BUILD_TARGET: aarch64-apple-darwin
+
+concurrency:
+  group: "${{ github.workflow }} - ${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Apple Silicon
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          targets: ${{ env.BUILD_TARGET }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
+          key: "rust-macos-release-${{ env.BUILD_TARGET }}"
+          workspaces: |
+            . -> target
+          cache-all-crates: true
+          cache-workspace-crates: true
+
+      - name: Add Rust Target
+        run: |
+          rustup target add ${{ env.BUILD_TARGET }} --toolchain 1.91.0 || rustup target add ${{ env.BUILD_TARGET }}
+          rustup target list --installed
+          echo "Rust target ${{ env.BUILD_TARGET }} installed."
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.15.0"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare macOS resources
+        run: pnpm run prebuild ${{ env.BUILD_TARGET }}
+
+      - name: Build macOS release bundle
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          NODE_OPTIONS: "--max_old_space_size=4096"
+        with:
+          tauriScript: pnpm
+          args: --target ${{ env.BUILD_TARGET }} --no-sign --config src-tauri/tauri.unsigned.conf.json
+
+      - name: Set artifact name
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "ARTIFACT_NAME=Clash.Verge_${VERSION}_aarch64_macos_internal_unsigned" >> "$GITHUB_ENV"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          archive: false
+          path: target/${{ env.BUILD_TARGET }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error

@@ -287,7 +287,7 @@ export const SystemInfoCard = () => {
             {t('home.components.systemInfo.fields.vergeVersion')}
           </Typography>
           <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
-            v{appVersion}
+            v{appVersion} dw
           </Typography>
         </Stack>
       </Stack>
